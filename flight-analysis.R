@@ -5,6 +5,7 @@ library(ggplot2)
 library(readr)
 library(data.table)
 library(scales) # scale_y_continuous(labels = comma)
+library(hexbin) # Hexbin plot (nhẹ hơn rất nhiề so vs scatter)
 
 options(scipen = 9999)
 
@@ -188,7 +189,7 @@ delay_rate_yearly1 <- df |>
 
 # heatmap plot
 ggplot(delay_rate_yearly, aes(x = factor(YEAR), 
-                              y = factor(MONTH), 
+                              y = factor(MONTH, levels = rev(1:12)), 
                               fill = Delay_Rate)) +
   geom_tile(color = "white") +
   geom_text(aes(label = round(Delay_Rate, 1)), 
@@ -207,18 +208,19 @@ ggplot(delay_rate_yearly, aes(x = factor(YEAR),
 
 #------------------------------------------
 # Thời gian delay trung bình là bao nhiêu phút?
+# 15p mới record nguyên nhân delay
 flights_delayed <- df |>
-  filter(DEP_DELAY > 0)
+  filter(ARR_DELAY > 15)
 
 delay_avg_yearly <- flights_delayed |>
   group_by(YEAR) |>
   summarise(
-    Avg_Arrival_Delay = round(mean(DEP_DELAY, na.rm=TRUE), 1)
+    Avg_Arrival_Delay = round(mean(ARR_DELAY, na.rm=TRUE), 1)
   ) |>
   ungroup()
 
 # Phân phối độ trễ (histogram): delay thường rơi vào khoảng bao nhiêu phút?
-ggplot(flights_delayed, aes(x = DEP_DELAY)) +
+ggplot(flights_delayed, aes(x = ARR_DELAY)) +
   geom_histogram(bins = 50, binwidth = 5,
                  color="darkgreen", 
                  fill = "lightgreen",
@@ -495,23 +497,325 @@ origin_taxiin_least <- taxiin_origin |>
 ############################################
 # 2. PHÂN TÍCH NGUYÊN NHÂN (DIAGNOSTIC ANALYSIS)
 ############################################
+#------------------------------------------
+# 2.1 Nguyên nhân delay
+#------------------------------------------
+# Trong các loại delay, loại nào chiếm nhiều thời gian nhất 
+# (carrier / weather / NAS / late aircraft / security)?
 
+# Tự động tìm các cột có tên bắt đầu bằng 'DELAY_DUE_'
+reason_cols <- grep("^DELAY_DUE_", names(df), value = TRUE)
 
+# Lấy delay và xem khi nào bắt đầu có dữ liệu nguyên nhân
+df <- df |>
+  mutate(HAS_REASON = if_any(all_of(reason_cols), ~ !is.na(.x)))
 
+# Tìm ngưỡng delay nhỏ nhất mà từ đó trở lên có nguyên nhân
+threshold <- df |>
+  filter(HAS_REASON) |>
+  summarise(min_delay = min(ARR_DELAY, na.rm = TRUE))
 
+print(threshold)
 
+# tính tổng các DELAY_DUE_ qua các năm
+delay_reason_total_yearly <- df |>
+  group_by(YEAR) |>
+  summarise(across(all_of(reason_cols), ~ sum(.x, na.rm = TRUE))) |>
+  ungroup()
 
+# stacked bar chart
+delay_long <- delay_reason_total_yearly |>
+  pivot_longer(cols = all_of(reason_cols), names_to = "Cause", values_to = "Minutes")
 
+ggplot(delay_long, aes(x = factor(YEAR), y = Minutes, fill = Cause)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Total Delay Minutes by Cause and Year",
+    x = "Year", y = "Total Delay (minutes)"
+  ) +
+  theme_minimal()
 
+# multi-line
+ggplot(delay_long, aes(x = YEAR, y = Minutes, color = Cause)) +
+  geom_line(size=1) +
+  geom_point(size=2) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Yearly Delay Trend by Cause",
+       x = "Year", y = "Total Delay (minutes)") +
+  theme_minimal()
 
+#------------------------------------------
+# Delay do “Late Aircraft” có mối liên hệ mạnh với ARR_DELAY tổng không?
 
+# Kiểm tra tương quan
+# Python không fill NA, R có fill NA → kết quả lệch.
+late_aircraft_df <- flights_delayed |> 
+  select(ARR_DELAY, DELAY_DUE_LATE_AIRCRAFT) |> 
+  drop_na()
 
+late_aircraft_corr <- cor(late_aircraft_df$ARR_DELAY, 
+                      late_aircraft_df$DELAY_DUE_LATE_AIRCRAFT)
 
+corr_review <- paste(
+  "Nhận xét:",
+  "- Late Aircraft Delay tăng → Arrival Delay cũng tăng",
+  "- corr ~ 0.504 -> trung bình - khá",
+  "- R-squared ≈ corr^2 = 0.504^2 ≈ 0.254",
+  "- => Khoảng 25% biến động Arrival Delay đến từ Late Aircraft Delay.\n",
+  sep = "\n"
+)
+cat(corr_review)
 
+ggplot(late_aircraft_df, aes(DELAY_DUE_LATE_AIRCRAFT, ARR_DELAY)) +
+  geom_hex() +
+  geom_smooth(method = "lm", color="red") +
+  scale_y_continuous(labels = comma) +
+  labs(title="Relationship: Late Aircraft Delay vs Arrival Delay",
+       x="Late Aircraft Delay", y="Arrival Delay")
 
+#------------------------------------------
+# Tỉ lệ delay do thời tiết khác nhau giữa các tháng như thế nào?
 
+# tổng số phút delay do weather theo year + month
+weather_delay_monthly <- flights_delayed |>
+  group_by(YEAR, MONTH) |>
+  summarise(Weather_Delay = sum(DELAY_DUE_WEATHER))
 
+# Tính tổng ARR_DELAY theo YEAR + MONTH
+arr_delay_monthly <- flights_delayed |>
+  group_by(YEAR, MONTH) |>
+  summarise(Arr_Delay = sum(ARR_DELAY))
 
+weather_rate_monthly <- weather_delay_monthly |>
+  inner_join(arr_delay_monthly, by = c("YEAR", "MONTH")) |>
+  mutate(Weather_Delay_Rate = round(Weather_Delay / Arr_Delay * 100, 1))
+  
+# plot
+ggplot(weather_rate_monthly, aes(x = factor(YEAR), 
+                                 y = factor(MONTH, levels = rev(1:12)), 
+                                 fill = Weather_Delay_Rate)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Weather_Delay_Rate, 1)), 
+            color = "black", size = 3.5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Weather_Delay_Rate (minutes)",
+    x = "Năm", y = "Tháng") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+#------------------------------------------
+# Kiểm tra tương quan
+# Python không fill NA, R có fill NA → kết quả lệch.
+due_weather_df <- flights_delayed |> 
+  select(ARR_DELAY, DELAY_DUE_WEATHER) |> 
+  drop_na()
+
+due_weather_corr <- cor(due_weather_df)
+
+corr_review1 <- paste(
+  "Nhận xét:",
+  "- DELAY_DUE_WEATHER tăng → Arrival Delay cũng tăng",
+  "- corr ~ 0.2872 -> thấp",
+  "- R-squared ≈ corr^2 ≈ 0.08248384 * 100 = 8.2%",
+  "- => Khoảng 8.2% biến động Arrival Delay đến từ Late Aircraft Delay.\n",
+  sep = "\n"
+)
+cat(corr_review1)
+
+ggplot(due_weather_df, aes(DELAY_DUE_WEATHER, ARR_DELAY)) +
+  geom_hex() +
+  geom_smooth(method = "lm", color="red") +
+  scale_y_continuous(labels = comma) +
+  labs(title="Relationship: Weather Delay vs Arrival Delay",
+       x="Weather Delay", y="Arrival Delay")
+
+#------------------------------------------
+# Hãng nào thường bị ảnh hưởng nhiều bởi thời tiết nhất?
+weather_delay_flights <- flights_delayed |>
+  group_by(YEAR, AIRLINE) |>
+  summarise(Flights_Delayed_Weather = sum(DELAY_DUE_WEATHER > 0, na.rm = TRUE))
+
+weather_delay_flights_top <- weather_delay_flights |>
+  group_by(YEAR) |>
+  slice_max(Flights_Delayed_Weather, n = 1, 
+            with_ties = FALSE) |>
+  ungroup()
+
+weather_delay_flights_least <- weather_delay_flights |>
+  group_by(YEAR) |>
+  slice_min(Flights_Delayed_Weather, n = 1, 
+            with_ties = FALSE) |>
+  ungroup()
+
+#------------------------------------------
+# Có mối tương quan giữa DISTANCE và AIR_TIME không?
+distance_air_df <- df |>
+  select("DISTANCE", "AIR_TIME") |>
+  drop_na()
+
+distance_air_corr <- cor(distance_air_df)
+
+corr_review2 <- paste(
+  "Nhận xét:",
+  "- DISTANCE tăng → AIR_TIME cũng tăng",
+  "- corr ~ 0.983 -> cao -> khoảng cách càng xa, thời gian bay càng nhiều",
+  "- R-squared ≈ correlation^2 = 0.966298 * 100 = 96%",
+  "- => Khoảng 96% biến động AIR_TIME đến từ DISTANCE",
+  sep = "\n"
+)
+cat(corr_review2)
+
+ggplot(distance_air_df, aes(DISTANCE, AIR_TIME)) +
+  geom_hex() +
+  geom_smooth(method = "lm", color="red") +
+  scale_y_continuous(labels = comma) +
+  labs(title="Relationship: DISTANCE vs AIR_TIME",
+       x="DISTANCE (miles)", y="AIR_TIME (minutes)")
+
+#------------------------------------------
+# Delay do “Carrier” có xu hướng xảy ra ở sân bay nào nhiều nhất?
+carrier_delay_flights <- flights_delayed |>
+  group_by(YEAR, ORIGIN, ORIGIN_CITY) |>
+  summarise(Flights_Delayed_Carrier = sum(DELAY_DUE_CARRIER > 0, na.rm = TRUE))
+
+carrier_delay_flights_top <- carrier_delay_flights |>
+  group_by(YEAR) |>
+  slice_max(Flights_Delayed_Carrier, n = 1, 
+            with_ties = FALSE) |>
+  ungroup()
+
+#------------------------------------------
+# TAXI_OUT dài có liên quan đến ARR_DELAY cao hơn không?
+taxiout_arrdelay_df <- df |>
+  select("TAXI_OUT", "ARR_DELAY") |>
+  drop_na()
+
+taxiout_arrdelay_corr <- cor(taxiout_arrdelay_df)
+
+corr_review3 <- paste(
+  "Nhận xét:",
+  "- TAXI_OUT tăng → ARR_DELAY cũng tăng",
+  "- corr ~ 0.195 -> thấp ",
+  "- R-squared ≈ correlation^2 = 0.38025 * 100 = 3.8%",
+  "- => Khoảng 3.8% biến động ARR_DELAY đến từ TAXI_OUT",
+  sep = "\n"
+)
+cat(corr_review3)
+
+#------------------------------------------
+# Thời gian bay (AIR_TIME) dài hơn có làm tăng khả năng delay (ARR_DELAY) không?
+airtime_arrdelay_df <- df |>
+  select("AIR_TIME", "ARR_DELAY") |>
+  drop_na()
+
+airtime_arrdelay_corr <- cor(airtime_arrdelay_df)
+
+corr_review4 <- paste(
+  "Nhận xét:",
+  "- AIR_TIME tăng → ARR_DELAY cũng tăng",
+  "- corr ~ 0.1723 -> thấp ",
+  "- R-squared ≈ correlation^2 = 0.002967 * 100 = 0.297%",
+  "- => Khoảng 0.297% biến động ARR_DELAY đến từ AIR_TIME",
+  sep = "\n"
+)
+cat(corr_review4)
+
+#------------------------------------------
+# Các chuyến đêm muộn hoặc sáng sớm có ít delay hơn không?
+flights_delayed <- flights_delayed |>
+  mutate(
+    HOUR = floor(CRS_DEP_TIME / 100),
+    TIME_BIN = case_when(
+      HOUR >= 22 | HOUR < 5 ~ "Late Night",
+      HOUR >= 5  & HOUR < 8 ~ "Early Morning",
+      HOUR >= 8  & HOUR < 17 ~ "Daytime",
+      TRUE ~ "Evening"
+    )
+  )
+
+timebin_delay_flights <- flights_delayed |>
+  group_by(YEAR, TIME_BIN) |>
+  summarise(Delay_Rate = round(mean(ARR_DELAY), 1))
+
+# plot
+ggplot(timebin_delay_flights, aes(x = factor(YEAR), 
+                                 y = TIME_BIN, 
+                                 fill = Delay_Rate)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Delay_Rate, 1)), 
+            color = "black", size = 3.5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Delay Rate by Time of Day",
+    x = "Năm", y = "TIME_BIN") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+#------------------------------------------
+# 2.2 Hủy chuyến và chuyển hướng
+#------------------------------------------
+# Nguyên nhân hủy chuyến (A–D) nào phổ biến nhất?
+cancel_code <- flights_cancelled |>
+  group_by(CANCELLATION_CODE) |>
+  summarise(Total_Flights = n())
+
+cancell_code_yearly <- flights_cancelled |>
+  group_by(YEAR, CANCELLATION_CODE) |>
+  summarise(Total_Flights = n())
+
+#------------------------------------------
+# Tháng nào có nhiều chuyến bị hủy nhất?
+flights_cancel_monthly <- flights_cancelled |>
+  group_by(MONTH) |>
+  summarise(Total_Cancelled_Flights = n())
+
+#------------------------------------------
+# Hãng nào có tỉ lệ diverted cao nhất?
+divert_rate_airline_yearly <- flights_diverted |>
+  group_by(YEAR, AIRLINE) |>
+  summarise(Total_Diverted_Flights = n())
+
+divert_rate_airline_top <- divert_rate_airline_yearly |>
+  group_by(YEAR) |>
+  slice_max(Total_Diverted_Flights, n = 1, 
+            with_ties = FALSE) |>
+  ungroup()
+
+#------------------------------------------
+# Có mối quan hệ giữa weather delay và cancellation code = B không?
+# Chỉ filter ra B → không kiểm tra được mối quan hệ.
+# Để kiểm tra quan hệ, bạn phải giữ cả 2 nhóm: có delay và không, bị hủy B và không.
+# Dùng: prop.table() + chisq.test() là rõ nhất.
+
+# Kiểm tra quan hệ: so sánh nhóm B và nhóm không B
+
+df$is_cancelled_B <- df$CANCELLATION_CODE == "B"
+df$has_weather_delay <- df$DELAY_DUE_WEATHER > 0
+table(df$has_weather_delay, df$is_cancelled_B)
+prop.table(table(df$has_weather_delay, df$is_cancelled_B), 1)
+
+# Chi-square test trong R
+tbl <- table(df$has_weather_delay, df$is_cancelled_B)
+chisq.test(tbl)
+
+# Logistic regression (nếu bạn muốn phân tích sâu hơn)
+model <- glm(is_cancelled_B ~ WEATHER_DELAY, data = df, family = binomial)
+summary(model)
+
+############################################
+# 3. Phân tích dự đoán (Predictive / Machine Learning)
+############################################
+# 3.1 Phân loại (Classification)
 
 
 
