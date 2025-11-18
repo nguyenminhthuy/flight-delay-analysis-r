@@ -7,7 +7,7 @@ library(data.table)
 library(scales) # scale_y_continuous(labels = comma)
 library(hexbin) # Hexbin plot (nhẹ hơn rất nhiề so vs scatter)
 
-options(scipen = 9999)
+# options(scipen = 9999)
 
 # faster than read_csv
 df = fread("data/flights_sample_2m.csv", header=TRUE)
@@ -28,7 +28,8 @@ df <- df |>
 #------------------------------------------
 # Số chuyến bay hàng năm
 
-flights_yearly <- df |>
+df_flights <- copy(df)
+flights_yearly <- df_flights |>
   group_by(YEAR) |>
   summarise(Total_Flights = n(), .groups = "drop")
 
@@ -44,7 +45,7 @@ ggplot(flights_yearly,
 
 #------------------------------------------
 # Số chuyến bay theo tháng của từng năm
-flights_monthly <- df |>
+flights_monthly <- df_flights |>
   group_by(YEAR, MONTH) |>
   summarise(Total_Flights = n(), .groups = "drop")
 
@@ -64,7 +65,7 @@ ggplot(flights_monthly,
 # Hãng hàng không nào có nhiều chuyến bay nhất mỗi năm?
 
 # Tổng số chuyến bay theo năm và hãng
-flights_airline_yearly <- df |>
+flights_airline_yearly <- df_flights |>
   group_by(YEAR, AIRLINE) |>
   summarise(Total_Flights = n(),
             .groups = "drop")
@@ -129,7 +130,7 @@ compare |>
 
 #------------------------------------------
 # Sân bay nào là điểm khởi hành (ít) phổ biến nhất?
-flights_origin_yearly <- df |>
+flights_origin_yearly <- df_flights |>
   group_by(YEAR, ORIGIN, ORIGIN_CITY) |>
   summarise(Total_Flights = n())
 
@@ -149,7 +150,7 @@ origin_least <- flights_origin_yearly |>
 
 #------------------------------------------
 # Sân bay nào là điểm đến (ít) phổ biến nhất?
-flights_dest_yearly <- df |>
+flights_dest_yearly <- df_flights |>
   group_by(YEAR, DEST, DEST_CITY) |>
   summarise(Total_Flights = n())
 
@@ -170,16 +171,11 @@ dest_least <- flights_dest_yearly |>
 #------------------------------------------
 # 1.2 Delay tổng quát
 #------------------------------------------
+df_flights_delay <- copy(df)
 # Tỉ lệ chuyến bay bị delay (>15 phút) là bao nhiêu?
 
 # tỉ lệ delay theo năm - tháng
-delay_rate_yearly <- df |>
-  group_by(YEAR, MONTH) |>
-  summarise(Delay_Rate = signif(mean(ARR_DELAY > 15, 
-                                     na.rm = TRUE) * 100, 3)) |>
-  ungroup()
-  
-delay_rate_yearly1 <- df |>
+delay_rate_yearly <- df_flights_delay |>
   mutate(is_delayed = ifelse(!is.na(ARR_DELAY) & ARR_DELAY > 15, 1, 0)) |>
   group_by(YEAR, MONTH) |>
   summarise(
@@ -209,7 +205,7 @@ ggplot(delay_rate_yearly, aes(x = factor(YEAR),
 #------------------------------------------
 # Thời gian delay trung bình là bao nhiêu phút?
 # 15p mới record nguyên nhân delay
-flights_delayed <- df |>
+flights_delayed <- df_flights_delay |>
   filter(ARR_DELAY > 15)
 
 delay_avg_yearly <- flights_delayed |>
@@ -235,8 +231,9 @@ ggplot(flights_delayed, aes(x = ARR_DELAY)) +
 
 #------------------------------------------
 # Tỉ lệ chuyến bay bị hủy (CANCELLED = 1)?
+df_flights_cancel <- copy(df)
 
-flights_cancelled <- df |>
+flights_cancelled <- df_flights_cancel |>
   filter(CANCELLED == 1)
 
 flights_cancel_yearly <- flights_cancelled |>
@@ -254,7 +251,9 @@ df_cancel_merge <- flights_cancel_yearly |>
 
 #------------------------------------------
 # Tỉ lệ chuyến bị diverted (DIVERTED = 1)?
-flights_diverted <- df |>
+df_flights_divert <- copy(df)
+
+flights_diverted <- df_flights_divert |>
   filter(DIVERTED == 1)
 
 divert_rate_yearly <- flights_diverted |>
@@ -458,7 +457,7 @@ origin_delay_least <- delay_origin |>
 
 #------------------------------------------
 # Sân bay nào thường xuyên gặp TAXI_OUT dài nhất?
-taxiout_origin <- df |>
+taxiout_origin <- df_flights |>
   group_by(YEAR, ORIGIN, ORIGIN_CITY) |>
   summarise(Avg_Out_Time = round(mean(TAXI_OUT, na.rm = TRUE), 1)) |>
   ungroup()
@@ -477,7 +476,7 @@ origin_taxiout_least <- taxiout_origin |>
 
 #------------------------------------------
 # Sân bay nào thường xuyên gặp TAXI_IN dài nhất?
-taxiin_origin <- df |>
+taxiin_origin <- df_flights |>
   group_by(YEAR, ORIGIN, ORIGIN_CITY) |>
   summarise(Avg_In_Time = round(mean(TAXI_IN, na.rm = TRUE), 1)) |>
   ungroup()
@@ -504,21 +503,21 @@ origin_taxiin_least <- taxiin_origin |>
 # (carrier / weather / NAS / late aircraft / security)?
 
 # Tự động tìm các cột có tên bắt đầu bằng 'DELAY_DUE_'
-reason_cols <- grep("^DELAY_DUE_", names(df), value = TRUE)
+reason_cols <- grep("^DELAY_DUE_", names(df_flights), value = TRUE)
 
 # Lấy delay và xem khi nào bắt đầu có dữ liệu nguyên nhân
-df <- df |>
+df_flights <- df_flights |>
   mutate(HAS_REASON = if_any(all_of(reason_cols), ~ !is.na(.x)))
 
 # Tìm ngưỡng delay nhỏ nhất mà từ đó trở lên có nguyên nhân
-threshold <- df |>
+threshold <- df_flights |>
   filter(HAS_REASON) |>
   summarise(min_delay = min(ARR_DELAY, na.rm = TRUE))
 
 print(threshold)
 
 # tính tổng các DELAY_DUE_ qua các năm
-delay_reason_total_yearly <- df |>
+delay_reason_total_yearly <- df_flights |>
   group_by(YEAR) |>
   summarise(across(all_of(reason_cols), ~ sum(.x, na.rm = TRUE))) |>
   ungroup()
@@ -655,7 +654,7 @@ weather_delay_flights_least <- weather_delay_flights |>
 
 #------------------------------------------
 # Có mối tương quan giữa DISTANCE và AIR_TIME không?
-distance_air_df <- df |>
+distance_air_df <- df_flights |>
   select("DISTANCE", "AIR_TIME") |>
   drop_na()
 
@@ -692,7 +691,7 @@ carrier_delay_flights_top <- carrier_delay_flights |>
 
 #------------------------------------------
 # TAXI_OUT dài có liên quan đến ARR_DELAY cao hơn không?
-taxiout_arrdelay_df <- df |>
+taxiout_arrdelay_df <- df_flights |>
   select("TAXI_OUT", "ARR_DELAY") |>
   drop_na()
 
@@ -710,7 +709,7 @@ cat(corr_review3)
 
 #------------------------------------------
 # Thời gian bay (AIR_TIME) dài hơn có làm tăng khả năng delay (ARR_DELAY) không?
-airtime_arrdelay_df <- df |>
+airtime_arrdelay_df <- df_flights |>
   select("AIR_TIME", "ARR_DELAY") |>
   drop_na()
 
@@ -797,20 +796,33 @@ divert_rate_airline_top <- divert_rate_airline_yearly |>
 # Để kiểm tra quan hệ, bạn phải giữ cả 2 nhóm: có delay và không, bị hủy B và không.
 # Dùng: prop.table() + chisq.test() là rõ nhất.
 
-# Kiểm tra quan hệ: so sánh nhóm B và nhóm không B
+# Cách 1: Kiểm tra quan hệ: so sánh nhóm B và nhóm không B
+# B1
+df$CANCELLATION_CODE <- as.character(df$CANCELLATION_CODE)
 
 df$is_cancelled_B <- df$CANCELLATION_CODE == "B"
 df$has_weather_delay <- df$DELAY_DUE_WEATHER > 0
+
+# B2 -> bảng tần suất
 table(df$has_weather_delay, df$is_cancelled_B)
-prop.table(table(df$has_weather_delay, df$is_cancelled_B), 1)
 
-# Chi-square test trong R
+# B3 -> bảng so sánh tỉ lệ theo nhóm
+prop.table(table(df$has_weather_delay, df$is_cancelled_B))
+
+#------------------------------------------
+# Cách 2: Chi-square test trong R
 tbl <- table(df$has_weather_delay, df$is_cancelled_B)
-chisq.test(tbl)
+results <- chisq.test(tbl)
+print(results)
 
-# Logistic regression (nếu bạn muốn phân tích sâu hơn)
-model <- glm(is_cancelled_B ~ WEATHER_DELAY, data = df, family = binomial)
+#------------------------------------------
+# Cách 3: Logistic regression (nếu muốn phân tích sâu hơn)
+model <- glm(is_cancelled_B ~ DELAY_DUE_WEATHER, 
+             data = df, family = binomial)
 summary(model)
+
+# df$is_cancelled_B -> 19022 / 2 triệu
+# data chiếm phần rất nhỏ của dữ liệu, ko đáng kể, có thể bỏ qua ko cần phân tích
 
 ############################################
 # 3. Phân tích dự đoán (Predictive / Machine Learning)
