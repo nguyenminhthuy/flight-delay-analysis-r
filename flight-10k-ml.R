@@ -12,6 +12,9 @@ library(stringr)
 library(vip)
 library(pdp)
 library(iml)
+library(Metrics)
+library(forcats)
+library(tidyverse)
 
 df_flights <- fread("data/flights_sample_10k.csv")
 
@@ -52,7 +55,8 @@ df <- df |>
 
 # Gộp các level hiếm cho categorical
 df <- df |>
-  mutate(across(all_of(categorical_cols), ~ fct_lump_prop(.x, 0.01, other_level = "Other")))
+  mutate(across(all_of(categorical_cols), 
+                ~ fct_lump_prop(.x, 0.01, other_level = "Other")))
 
 #-----------------------------------------
 # One-hot encoding
@@ -88,7 +92,11 @@ metrics_calculator <- function(y_true, y_pred_class, y_pred_prob, model_name = "
   
   # confusion matrix, roc-auc, pr-auc
   conf_mat <- confusionMatrix(factor(y_pred_class_clean), factor(y_true_clean))
-  roc_auc <- auc(roc(y_true_clean, y_pred_prob_clean))
+  roc_obj <- pROC::roc(
+    response = y_true_clean,
+    predictor = y_pred_prob_clean)
+  roc_auc <- pROC::auc(roc_obj) 
+  
   pr_obj <- pr.curve(scores.class0 = y_pred_prob_clean,
                      weights.class0 = y_true_clean,
                      curve = FALSE)
@@ -226,7 +234,7 @@ plot(var_importance)
 
 #----------------------------------------#
 # Method 3: SHAP Values
-X_train <- train %>% select(-IS_DELAYED)
+X_train <- train |> select(-IS_DELAYED)
 y_train <- as.numeric(as.character(train$IS_DELAYED))
 
 predictor <- Predictor$new(
@@ -323,7 +331,7 @@ metrics_plots(test_1$IS_CANCELLED, rf_pred_class_1, rf_pred_prob_1)
 
 #----------------------------------------#
 # XGBoost - nhận matrix
-#----------------------------------------#
+
 train_matrix_1 <- xgb.DMatrix(data=as.matrix(train_1 |> select(-IS_CANCELLED)), 
                             label=as.numeric(as.character(train_1$IS_CANCELLED)))
 
@@ -348,11 +356,6 @@ metrics_plots(test_1$IS_CANCELLED, xgb_pred_class_1, xgb_pred_prob_1)
 #----------------------------------------#
 # Dự đoán số phút delay (ARR_DELAY)
 #----------------------------------------#
-
-
-
-
-
 
 
 
