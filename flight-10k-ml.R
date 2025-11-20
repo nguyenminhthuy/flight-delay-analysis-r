@@ -356,7 +356,46 @@ metrics_plots(test_1$IS_CANCELLED, xgb_pred_class_1, xgb_pred_prob_1)
 #----------------------------------------#
 # Dự đoán số phút delay (ARR_DELAY)
 #----------------------------------------#
+df_2 <- copy(df_flights)
+df_2 <- df_2 |>
+  mutate(
+    FL_DATE = as.IDate(FL_DATE),
+    YEAR = as.integer(format(FL_DATE, "%Y")),
+    MONTH = as.integer(format(FL_DATE, "%m")),
+    DEP_HH = DEP_TIME %/% 100,
+    CRS_DEP_HH = CRS_DEP_TIME %/% 100
+  ) |>
+  select(MONTH, DEP_HH, CRS_DEP_HH, ORIGIN, DEST, DISTANCE, ARR_DELAY) |>
+  filter(is.finite(ARR_DELAY)) # loại NA, NaN, Inf
 
+df_2 <- df_2 |>
+  mutate(across(c(DEP_HH, CRS_DEP_HH, DISTANCE),
+                ~ ifelse(is.na(.x), median(.x, na.rm = TRUE), .x)))
+
+# One-hot encoding categorical
+df_2 <- fastDummies::dummy_cols(df_2, select_columns = c("ORIGIN", "DEST"), 
+                                remove_first_dummy = TRUE, remove_selected_columns = TRUE)
+
+# Drop rows with any NA (last check)
+df_2 <- df_2 |> 
+  filter(if_all(everything(), ~ !is.na(.x)))
+
+train_index_2 <- createDataPartition(df_2$ARR_DELAY, p = 0.8, list = FALSE)
+train_2 <- df_2[train_index_2, ]
+test_2 <- df_2[-train_index_2, ]
+
+rf_model_2 <- randomForest(ARR_DELAY ~ ., data = train_2, ntree = 100)
+rf_pred_2 <- predict(rf_model_2, test_2)
+
+# Metrics
+rmse_val <- rmse(test_2$ARR_DELAY, rf_pred_2)
+mae_val <- mae(test_2$ARR_DELAY, rf_pred_2)
+r2_val <- 1 - sum((test_2$ARR_DELAY - rf_pred_2)^2) / 
+          sum((test_2$ARR_DELAY - mean(test_2$ARR_DELAY))^2)
+
+cat("RMSE:", round(rmse_val,2), "\n")
+cat("MAE:", round(mae_val,2), "\n")
+cat("R^2:", round(r2_val,3), "\n")
 
 
 
