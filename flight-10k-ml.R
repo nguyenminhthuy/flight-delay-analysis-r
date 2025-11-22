@@ -15,16 +15,18 @@ library(iml)
 library(Metrics)
 library(forcats)
 library(tidyverse)
+library(lubridate)
+library(forecast)
+library(prophet)
 
 df_flights <- fread("data/flights_sample_10k.csv")
 
 ##########################################
 # Phân tích dự đoán (Predictive / Machine Learning)
-##########################################
 #----------------------------------------#
 # 1. Phân loại (Classification)
 # 1.1 Xây dựng mô hình dự đoán chuyến bay có delay >15 phút (0/1)
-#----------------------------------------#
+##########################################
 df <- copy(df_flights)
 
 df <- df |>
@@ -351,11 +353,11 @@ xgb_pred_class_1 <- ifelse(xgb_pred_prob_1 > 0.3, 1, 0)
 metrics_calculator(test_1$IS_CANCELLED, xgb_pred_class_1, xgb_pred_prob_1, "XGBoost")
 metrics_plots(test_1$IS_CANCELLED, xgb_pred_class_1, xgb_pred_prob_1)
 
-#----------------------------------------#
+##########################################
 # 1.2 Hồi quy (Regression)
 #----------------------------------------#
 # Dự đoán số phút delay (ARR_DELAY)
-#----------------------------------------#
+##########################################
 df_2 <- copy(df_flights)
 df_2 <- df_2 |>
   mutate(
@@ -370,11 +372,14 @@ df_2 <- df_2 |>
 
 df_2 <- df_2 |>
   mutate(across(c(DEP_HH, CRS_DEP_HH, DISTANCE),
-                ~ ifelse(is.na(.x), median(.x, na.rm = TRUE), .x)))
+                ~ ifelse(is.na(.x), 
+                         median(.x, na.rm = TRUE), .x)))
 
 # One-hot encoding categorical
-df_2 <- fastDummies::dummy_cols(df_2, select_columns = c("ORIGIN", "DEST"), 
-                                remove_first_dummy = TRUE, remove_selected_columns = TRUE)
+df_2 <- fastDummies::dummy_cols(df_2, 
+                                select_columns = c("ORIGIN", "DEST"), 
+                                remove_first_dummy = TRUE, 
+                                remove_selected_columns = TRUE)
 
 # Drop rows with any NA (last check)
 df_2 <- df_2 |> 
@@ -384,20 +389,156 @@ train_index_2 <- createDataPartition(df_2$ARR_DELAY, p = 0.8, list = FALSE)
 train_2 <- df_2[train_index_2, ]
 test_2 <- df_2[-train_index_2, ]
 
+#----------------------------------------#
 rf_model_2 <- randomForest(ARR_DELAY ~ ., data = train_2, ntree = 100)
 rf_pred_2 <- predict(rf_model_2, test_2)
 
 # Metrics
-rmse_val <- rmse(test_2$ARR_DELAY, rf_pred_2)
-mae_val <- mae(test_2$ARR_DELAY, rf_pred_2)
-r2_val <- 1 - sum((test_2$ARR_DELAY - rf_pred_2)^2) / 
-          sum((test_2$ARR_DELAY - mean(test_2$ARR_DELAY))^2)
+rmse_rf_val <- rmse(test_2$ARR_DELAY, rf_pred_2)
+mae_rf_val <- mae(test_2$ARR_DELAY, rf_pred_2)
+r2_rf_val <- 1 - sum((test_2$ARR_DELAY - rf_pred_2)^2) / 
+              sum((test_2$ARR_DELAY - mean(test_2$ARR_DELAY))^2)
 
-cat("RMSE:", round(rmse_val,2), "\n")
-cat("MAE:", round(mae_val,2), "\n")
-cat("R^2:", round(r2_val,3), "\n")
+cat("MAE:", round(mae_rf_val,2), "\n")
+cat("RMSE:", round(rmse_rf_val,2), "\n")
+cat("R^2:", round(r2_rf_val,3), "\n")
 
+rf_imp_2 <- importance(rf_model_2)
+rf_imp_2
+vip(rf_model_2)
 
+#----------------------------------------#
+train_matrix_2 <- xgb.DMatrix(data = as.matrix(train_2 |> select(-ARR_DELAY)), 
+                              label = train_2$ARR_DELAY)
+
+test_matrix_2 <- xgb.DMatrix(data = as.matrix(test_2 |> select(-ARR_DELAY)), 
+                             label = test_2$ARR_DELAY)
+
+xgb_model_2 <- xgb.train(params = list(objective = "reg:squarederror", 
+                                       eval_metric = "rmse"), 
+                         data = train_matrix_2, nrounds = 200, verbose = 0)
+
+xgb_pred_2 <- predict(xgb_model_2, test_matrix_2)
+
+rmse_xgb_val <- rmse(test_2$ARR_DELAY, xgb_pred_2)
+mae_xgb_val <- mae(test_2$ARR_DELAY, xgb_pred_2)
+r2_xgb_val <- 1 - sum((test_2$ARR_DELAY - xgb_pred_2)^2) /
+              sum((test_2$ARR_DELAY - mean(test_2$ARR_DELAY))^2)
+
+cat("MAE:", round(mae_xgb_val, 2), "\n")
+cat("RMSE:", round(rmse_xgb_val, 2), "\n")
+cat("R^2:", round(r2_xgb_val, 3), "\n")
+
+xgb_imp_2  <- xgb.importance(
+  feature_names = colnames(train_2 |> select(-ARR_DELAY)),  
+  model = xgb_model_2
+)
+xgb_imp_2
+xgb.plot.importance(xgb_imp_2)
+
+##########################################
+# 1.3 Chuỗi thời gian (Time Series)
+#----------------------------------------#
+# Dự báo delay trung bình tháng tiếp theo.
+# Forecast Monthly Delay (SARIMAX + Prophet)
+##########################################
+df_3 <- copy(df_flights) 
+
+# Tính delay trung bình theo tháng
+monthly_delay <- df_3 |>
+  group_by(Month = floor_date(FL_DATE, "month")) |>
+  summarise(ARR_DELAY = mean(pmin(ARR_DELAY, 200), na.rm = TRUE)) |>  # loại bỏ outlier >200
+  ungroup()
+
+# Log-transform giống Python
+monthly_delay$ARR_DELAY_LOG <- log1p(monthly_delay$ARR_DELAY)
+
+# Tạo ts object
+ts_data <- ts(monthly_delay$ARR_DELAY_LOG, 
+              start = c(year(min(monthly_delay$Month)),
+                        month(min(monthly_delay$Month))),
+              frequency = 12)
+
+#----------------------------------------#
+# SARIMA model
+sarima_fit <- auto.arima(ts_data, seasonal = TRUE)
+
+# Forecast 12 tháng tiếp theo
+sarima_fc <- forecast(sarima_fit, h = 12)
+
+# Chuyển về scale gốc, tránh âm
+sarima_fc_df <- data.frame(
+  Month = seq(from = max(monthly_delay$Month) %m+% months(1),
+              by = "month", length.out = 12),
+  Predicted_DELAY = pmax(expm1(sarima_fc$mean), 0),
+  CI_lower = pmax(expm1(sarima_fc$lower[,1]), 0),
+  CI_upper = pmax(expm1(sarima_fc$upper[,2]), 0)
+)
+
+print(sarima_fc_df)
+
+# Plots
+# plot 1
+ggplot() +
+  geom_line(data = monthly_delay, 
+            aes(x = Month, y = ARR_DELAY, color = "Observed"), 
+            size = 0.5) +
+  geom_line(data = sarima_fc_df, 
+            aes(x = Month, y = Predicted_DELAY, color = "Forecast"), size = 0.5) +
+  geom_ribbon(data = sarima_fc_df, 
+              aes(x = Month, ymin = CI_lower, ymax = CI_upper),
+              fill = "pink", alpha = 0.3) +
+  scale_color_manual(values = c("Observed" = "blue", "Forecast" = "red")) +
+  labs(title = "Forecast Average Arrival Delay per Month",
+       x = "Month", y = "Average Delay (minutes)",
+       color = "Legend") +
+  theme_minimal()
+
+# plot 2
+sarima_fc_df$Month <- as.Date(sarima_fc_df$Month)
+
+ggplot(sarima_fc_df, aes(x = Month)) +
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper), fill = "pink", alpha = 0.3) +
+  geom_line(aes(y = Predicted_DELAY, color = "Forecast"), size = 0.5) +
+  geom_point(aes(y = Predicted_DELAY, color = "Forecast"), size = 0.5) +
+  scale_color_manual(values = c("Forecast" = "red")) +
+  # Labels
+  labs(
+    title = "Forecast Average Arrival Delay per Month",
+    x = "Month", y = "Average Delay (minutes)",
+    color = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+#----------------------------------------#
+# Prophet
+monthly_delay_prophet <- df_3 |>
+  group_by(Month = floor_date(FL_DATE, "month")) |>
+  summarise(ARR_DELAY = mean(ARR_DELAY, na.rm = TRUE)) |>
+  ungroup()
+
+# Chuẩn hóa dữ liệu cho Prophet
+prophet_df <- monthly_delay_prophet |>
+  rename(ds = Month, y = ARR_DELAY)
+
+m <- prophet(prophet_df, 
+             yearly.seasonality = TRUE,
+             weekly.seasonality = FALSE, 
+             daily.seasonality = FALSE)
+
+# Tạo dataframe dự báo 12 tháng tiếp theo
+p_future <- make_future_dataframe(m, periods = 12, freq = "month")
+p_forecast <- predict(m, p_future)
+
+p <- plot(m, p_forecast) +
+  ggtitle("Forecast Average Arrival Delay per Month using Prophet") +
+  xlab("Month") +
+  ylab("Average Delay (minutes)")
+
+print(p)
 
 
 
